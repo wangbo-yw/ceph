@@ -2206,6 +2206,19 @@ void RGWGetObj::execute(optional_yield y)
       filter = &*decompress;
   }
 
+  attr_iter = attrs.find(RGW_ATTR_MANIFEST);
+  if (attr_iter != attrs.end() && get_type() == RGW_OP_GET_OBJ && get_data) {
+    RGWObjManifest m;
+    decode(m, attr_iter->second);
+    if (m.get_tier_type() == "cloud-s3") {
+      /* XXX: Instead send presigned redirect or read-through */
+      op_ret = -ERR_INVALID_OBJECT_STATE;
+      ldpp_dout(this, 0) << "ERROR: Cannot get cloud tiered object. Failing with "
+		       << op_ret << dendl;
+      goto done_err;
+    }
+  }
+
   attr_iter = attrs.find(RGW_ATTR_USER_MANIFEST);
   if (attr_iter != attrs.end() && !skip_manifest) {
     op_ret = handle_user_manifest(attr_iter->second.c_str(), y);
@@ -3415,27 +3428,13 @@ void RGWDeleteBucket::execute(optional_yield y)
     return;
   }
 
-  string prefix, delimiter;
-
-  if (s->prot_flags & RGW_REST_SWIFT) {
-    string path_args;
-    path_args = s->info.args.get("path");
-    if (!path_args.empty()) {
-      if (!delimiter.empty() || !prefix.empty()) {
-        op_ret = -EINVAL;
-        return;
-      }
-      prefix = path_args;
-      delimiter="/";
-    }
-  }
-
-  op_ret = s->bucket->remove_bucket(this, false, prefix, delimiter, false, nullptr, y);
+  op_ret = s->bucket->remove_bucket(this, false, false, nullptr, y);
   if (op_ret < 0 && op_ret == -ECANCELED) {
       // lost a race, either with mdlog sync or another delete bucket operation.
       // in either case, we've already called ctl.bucket->unlink_bucket()
       op_ret = 0;
   }
+
   return;
 }
 
@@ -3989,6 +3988,18 @@ void RGWPutObj::execute(optional_yield y)
       ldpp_dout(this, 0) << "ERROR: get copy source obj state returned with error" << op_ret << dendl;
       return;
     }
+    bufferlist bl;
+    if (astate->get_attr(RGW_ATTR_MANIFEST, bl)) {
+      RGWObjManifest m;
+      decode(m, bl);
+      if (m.get_tier_type() == "cloud-s3") {
+        op_ret = -ERR_INVALID_OBJECT_STATE;
+        ldpp_dout(this, 0) << "ERROR: Cannot copy cloud tiered object. Failing with "
+		       << op_ret << dendl;
+        return;
+      }
+    }
+
     if (!astate->exists){
       op_ret = -ENOENT;
       return;
@@ -5420,6 +5431,20 @@ void RGWCopyObj::execute(optional_yield y)
     if (op_ret < 0) {
       return;
     }
+
+    /* Check if the src object is cloud-tiered */
+    bufferlist bl;
+    if (astate->get_attr(RGW_ATTR_MANIFEST, bl)) {
+      RGWObjManifest m;
+      decode(m, bl);
+      if (m.get_tier_type() == "cloud-s3") {
+        op_ret = -ERR_INVALID_OBJECT_STATE;
+        ldpp_dout(this, 0) << "ERROR: Cannot copy cloud tiered object. Failing with "
+		       << op_ret << dendl;
+        return;
+      }
+    }
+
     obj_size = astate->size;
   
     if (!s->system_request) { // no quota enforcement for system requests
@@ -6987,7 +7012,7 @@ bool RGWBulkDelete::Deleter::delete_single(const acct_path_t& path, optional_yie
       goto delop_fail;
     }
   } else {
-    ret = bucket->remove_bucket(dpp, false, string(), string(), true, &s->info, s->yield);
+    ret = bucket->remove_bucket(dpp, false, true, &s->info, s->yield);
     if (ret < 0) {
       goto delop_fail;
     }
@@ -6995,7 +7020,6 @@ bool RGWBulkDelete::Deleter::delete_single(const acct_path_t& path, optional_yie
 
   num_deleted++;
   return true;
-
 
 binfo_fail:
     if (-ENOENT == ret) {

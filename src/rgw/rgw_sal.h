@@ -553,6 +553,20 @@ class Bucket {
       bool list_versions{false};
       bool allow_unordered{false};
       int shard_id{RGW_NO_SHARD};
+
+      friend std::ostream& operator<<(std::ostream& out, const ListParams& p) {
+	out << "rgw::sal::Bucket::ListParams{ prefix=\"" << p.prefix <<
+	  "\", delim=\"" << p.delim <<
+	  "\", marker=\"" << p.marker <<
+	  "\", end_marker=\"" << p.end_marker <<
+	  "\", ns=\"" << p.ns <<
+	  "\", enforce_ns=" << p.enforce_ns <<
+	  ", list_versions=" << p.list_versions <<
+	  ", allow_unordered=" << p.allow_unordered <<
+	  ", shard_id=" << p.shard_id <<
+	  " }";
+	return out;
+      }
     };
     /**
      * @brief Results from a bucket list operation
@@ -601,7 +615,7 @@ class Bucket {
     /** Set the cached attributes on this bucket */
     virtual int set_attrs(Attrs a) { attrs = a; return 0; }
     /** Remove this bucket from the backing store */
-    virtual int remove_bucket(const DoutPrefixProvider* dpp, bool delete_children, std::string prefix, std::string delimiter, bool forward_to_master, req_info* req_info, optional_yield y) = 0;
+    virtual int remove_bucket(const DoutPrefixProvider* dpp, bool delete_children, bool forward_to_master, req_info* req_info, optional_yield y) = 0;
     /** Remove this bucket, bypassing garbage collection.  May be removed */
     virtual int remove_bucket_bypass_gc(int concurrent_max, bool
 					keep_index_consistent,
@@ -719,10 +733,9 @@ class Bucket {
 				std::vector<std::unique_ptr<MultipartUpload>>& uploads,
 				std::map<std::string, bool> *common_prefixes,
 				bool *is_truncated) = 0;
-    /** Abort multipart uploads matching the prefix and delimiter */
-    virtual int abort_multiparts(const DoutPrefixProvider *dpp,
-				 CephContext *cct,
-				 std::string& prefix, std::string& delim) = 0;
+    /** Abort multipart uploads in a bucket */
+    virtual int abort_multiparts(const DoutPrefixProvider* dpp,
+				 CephContext* cct) = 0;
 
     /* dang - This is temporary, until the API is completed */
     rgw_bucket& get_key() { return info.bucket; }

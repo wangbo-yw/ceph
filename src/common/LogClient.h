@@ -194,7 +194,8 @@ public:
   };
 
   LogClient(CephContext *cct, Messenger *m, MonMap *mm,
-	    enum logclient_flag_t flags);
+          logclient_flag_t flags);
+
   virtual ~LogClient() {
     channels.clear();
   }

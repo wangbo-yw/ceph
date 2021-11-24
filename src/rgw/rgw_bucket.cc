@@ -462,8 +462,7 @@ static void dump_bucket_usage(map<RGWObjCategory, RGWStorageStats>& stats, Forma
   formatter->open_object_section("usage");
   for (iter = stats.begin(); iter != stats.end(); ++iter) {
     RGWStorageStats& s = iter->second;
-    const char *cat_name = rgw_obj_category_name(iter->first);
-    formatter->open_object_section(cat_name);
+    formatter->open_object_section(to_string(iter->first));
     s.dump(formatter);
     formatter->close_section();
   }
@@ -1020,7 +1019,7 @@ int RGWBucketAdminOp::remove_bucket(rgw::sal::Store* store, RGWBucketAdminOpStat
   if (bypass_gc)
     ret = bucket->remove_bucket_bypass_gc(op_state.get_max_aio(), keep_index_consistent, y, dpp);
   else
-    ret = bucket->remove_bucket(dpp, op_state.will_delete_children(), string(), string(),
+    ret = bucket->remove_bucket(dpp, op_state.will_delete_children(),
 				false, nullptr, y);
 
   return ret;

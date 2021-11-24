@@ -360,17 +360,17 @@ RadosBucket::~RadosBucket() {}
 
 int RadosBucket::remove_bucket(const DoutPrefixProvider* dpp,
 			       bool delete_children,
-			       std::string prefix,
-			       std::string delimiter,
 			       bool forward_to_master,
-			       req_info* req_info, optional_yield y)
+			       req_info* req_info,
+			       optional_yield y)
 {
   int ret;
 
   // Refresh info
   ret = load_bucket(dpp, y);
-  if (ret < 0)
+  if (ret < 0) {
     return ret;
+  }
 
   ListParams params;
   params.list_versions = true;
@@ -382,8 +382,9 @@ int RadosBucket::remove_bucket(const DoutPrefixProvider* dpp,
     results.objs.clear();
 
     ret = list(dpp, params, 1000, results, y);
-    if (ret < 0)
+    if (ret < 0) {
       return ret;
+    }
 
     if (!results.objs.empty() && !delete_children) {
       ldpp_dout(dpp, -1) << "ERROR: could not remove non-empty bucket " << info.bucket.name <<
@@ -401,12 +402,9 @@ int RadosBucket::remove_bucket(const DoutPrefixProvider* dpp,
     }
   } while(results.is_truncated);
 
-  /* If there's a prefix, then we are aborting multiparts as well */
-  if (!prefix.empty()) {
-    ret = abort_multiparts(dpp, store->ctx(), prefix, delimiter);
-    if (ret < 0) {
-      return ret;
-    }
+  ret = abort_multiparts(dpp, store->ctx());
+  if (ret < 0) {
+    return ret;
   }
 
   ret = store->ctl()->bucket->sync_user_stats(dpp, info.owner, info, y);
@@ -476,9 +474,7 @@ int RadosBucket::remove_bucket_bypass_gc(int concurrent_max, bool
   if (ret < 0)
     return ret;
 
-  string prefix, delimiter;
-
-  ret = abort_multiparts(dpp, cct, prefix, delimiter);
+  ret = abort_multiparts(dpp, cct);
   if (ret < 0) {
     return ret;
   }
@@ -560,8 +556,8 @@ int RadosBucket::remove_bucket_bypass_gc(int concurrent_max, bool
         max_aio = concurrent_max;
       }
       obj_ctx.invalidate(obj->get_obj());
-    } // for all RGW objects
-  }
+    } // for all RGW objects in results
+  } // while is_truncated
 
   ret = handles->drain();
   if (ret < 0) {
@@ -579,7 +575,7 @@ int RadosBucket::remove_bucket_bypass_gc(int concurrent_max, bool
   // this function can only be run if caller wanted children to be
   // deleted, so we can ignore the check for children as any that
   // remain are detritus from a prior bug
-  ret = remove_bucket(dpp, true, std::string(), std::string(), false, nullptr, y);
+  ret = remove_bucket(dpp, true, false, nullptr, y);
   if (ret < 0) {
     ldpp_dout(dpp, -1) << "ERROR: could not remove bucket " << this << dendl;
     return ret;
@@ -917,9 +913,8 @@ int RadosBucket::list_multiparts(const DoutPrefixProvider *dpp,
   return 0;
 }
 
-int RadosBucket::abort_multiparts(const DoutPrefixProvider *dpp,
-				 CephContext *cct,
-				 string& prefix, string& delim)
+int RadosBucket::abort_multiparts(const DoutPrefixProvider* dpp,
+				  CephContext* cct)
 {
   constexpr int max = 1000;
   int ret, num_deleted = 0;
@@ -928,14 +923,16 @@ int RadosBucket::abort_multiparts(const DoutPrefixProvider *dpp,
   string marker;
   bool is_truncated;
 
+  const std::string empty_delim;
+  const std::string empty_prefix;
+
   do {
-    ret = list_multiparts(dpp, prefix, marker, delim,
-				 max, uploads, nullptr, &is_truncated);
+    ret = list_multiparts(dpp, empty_prefix, marker, empty_delim,
+			  max, uploads, nullptr, &is_truncated);
     if (ret < 0) {
       ldpp_dout(dpp, 0) << __func__ <<
 	" ERROR : calling list_bucket_multiparts; ret=" << ret <<
-	"; bucket=\"" << this << "\"; prefix=\"" <<
-	prefix << "\"; delim=\"" << delim << "\"" << dendl;
+	"; bucket=\"" << this << "\"" << dendl;
       return ret;
     }
     ldpp_dout(dpp, 20) << __func__ <<

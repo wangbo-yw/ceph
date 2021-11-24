@@ -14,7 +14,7 @@ except ImportError:
     pass
 
 from cephadm import CephadmOrchestrator
-from orchestrator import raise_if_exception, OrchResult, HostSpec
+from orchestrator import raise_if_exception, OrchResult, HostSpec, DaemonDescriptionStatus
 from tests import mock
 
 
@@ -23,7 +23,7 @@ def get_ceph_option(_, key):
 
 
 def _run_cephadm(ret):
-    def foo(s, host, entity, cmd, e, **kwargs):
+    async def foo(s, host, entity, cmd, e, **kwargs):
         if cmd == 'gather-facts':
             return '{}', '', 0
         return [ret], '', 0
@@ -58,7 +58,7 @@ def receive_agent_metadata(m: CephadmOrchestrator, host: str, ops: List[str] = N
     }
     if ops:
         for op in ops:
-            out = CephadmServe(m)._run_cephadm_json(host, cephadmNoImage, op, [])
+            out = m.wait_async(CephadmServe(m)._run_cephadm_json(host, cephadmNoImage, op, []))
             to_update[op](host, out)
     m.cache.last_daemon_update[host] = datetime_now()
     m.cache.last_facts_update[host] = datetime_now()
@@ -152,7 +152,7 @@ def assert_rm_service(cephadm: CephadmOrchestrator, srv_name):
 
 
 @contextmanager
-def with_service(cephadm_module: CephadmOrchestrator, spec: ServiceSpec, meth=None, host: str = '') -> Iterator[List[str]]:
+def with_service(cephadm_module: CephadmOrchestrator, spec: ServiceSpec, meth=None, host: str = '', status_running=False) -> Iterator[List[str]]:
     if spec.placement.is_empty() and host:
         spec.placement = PlacementSpec(hosts=[host], count=1)
     if meth is not None:
@@ -167,6 +167,9 @@ def with_service(cephadm_module: CephadmOrchestrator, spec: ServiceSpec, meth=No
 
     CephadmServe(cephadm_module)._apply_all_services()
 
+    if status_running:
+        make_daemons_running(cephadm_module, spec.service_name())
+
     dds = wait(cephadm_module, cephadm_module.list_daemons())
     own_dds = [dd for dd in dds if dd.service_name() == spec.service_name()]
     if host:
@@ -175,6 +178,12 @@ def with_service(cephadm_module: CephadmOrchestrator, spec: ServiceSpec, meth=No
     yield [dd.name() for dd in own_dds]
 
     assert_rm_service(cephadm_module, spec.service_name())
+
+
+def make_daemons_running(cephadm_module, service_name):
+    own_dds = cephadm_module.cache.get_daemons_by_service(service_name)
+    for dd in own_dds:
+        dd.status = DaemonDescriptionStatus.running  # We're changing the reference
 
 
 def _deploy_cephadm_binary(host):

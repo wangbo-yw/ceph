@@ -259,6 +259,7 @@ using ceph::crypto::MD5;
 #define ERR_POSITION_NOT_EQUAL_TO_LENGTH                 2219
 #define ERR_OBJECT_NOT_APPENDABLE                        2220
 #define ERR_INVALID_BUCKET_STATE                         2221
+#define ERR_INVALID_OBJECT_STATE			 2222
 
 #define ERR_BUSY_RESHARDING      2300
 #define ERR_NO_SUCH_ENTITY       2301
@@ -1491,14 +1492,6 @@ inline std::ostream& operator<<(std::ostream& out, const rgw_obj_key &o) {
   return out << o.to_str();
 }
 
-inline std::ostream& operator<<(std::ostream& out, const rgw_obj_index_key &o) {
-  if (o.instance.empty()) {
-    return out << o.name;
-  } else {
-    return out << o.name << "[" << o.instance << "]";
-  }
-}
-
 struct req_init_state {
   /* Keeps [[tenant]:]bucket until we parse the token. */
   std::string url_bucket;
@@ -1970,22 +1963,6 @@ static inline void append_rand_alpha(CephContext *cct, const std::string& src, s
   gen_rand_alphanumeric(cct, buf, len);
   dest.append("_");
   dest.append(buf);
-}
-
-static inline const char *rgw_obj_category_name(RGWObjCategory category)
-{
-  switch (category) {
-  case RGWObjCategory::None:
-    return "rgw.none";
-  case RGWObjCategory::Main:
-    return "rgw.main";
-  case RGWObjCategory::Shadow:
-    return "rgw.shadow";
-  case RGWObjCategory::MultiMeta:
-    return "rgw.multimeta";
-  }
-
-  return "unknown";
 }
 
 static inline uint64_t rgw_rounded_kb(uint64_t bytes)
