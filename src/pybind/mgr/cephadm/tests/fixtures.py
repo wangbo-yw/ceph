@@ -18,6 +18,12 @@ from orchestrator import raise_if_exception, OrchResult, HostSpec, DaemonDescrip
 from tests import mock
 
 
+def async_side_effect(result):
+    async def side_effect(*args, **kwargs):
+        return result
+    return side_effect
+
+
 def get_ceph_option(_, key):
     return __file__
 
@@ -80,7 +86,6 @@ def with_cephadm_module(module_options=None, store=None):
     with mock.patch("cephadm.module.CephadmOrchestrator.get_ceph_option", get_ceph_option),\
             mock.patch("cephadm.services.osd.RemoveUtil._run_mon_cmd"), \
             mock.patch("cephadm.module.CephadmOrchestrator.get_osdmap"), \
-            mock.patch("cephadm.services.osd.OSDService.get_osdspec_affinity", return_value='test_spec'), \
             mock.patch("cephadm.module.CephadmOrchestrator.remote"), \
             mock.patch("cephadm.agent.CephadmAgentHelpers._request_agent_acks"), \
             mock.patch("cephadm.agent.CephadmAgentHelpers._apply_agent", return_value=False), \
@@ -124,15 +129,14 @@ def wait(m, c):
 
 
 @contextmanager
-def with_host(m: CephadmOrchestrator, name, addr='1::4', refresh_hosts=True):
-    # type: (CephadmOrchestrator, str) -> None
+def with_host(m: CephadmOrchestrator, name, addr='1::4', refresh_hosts=True, rm_with_force=True):
     with mock.patch("cephadm.utils.resolve_ip", return_value=addr):
         wait(m, m.add_host(HostSpec(hostname=name)))
         if refresh_hosts:
             CephadmServe(m)._refresh_hosts_and_daemons()
             receive_agent_metadata(m, name)
         yield
-        wait(m, m.remove_host(name))
+        wait(m, m.remove_host(name, force=rm_with_force))
 
 
 def assert_rm_service(cephadm: CephadmOrchestrator, srv_name):
@@ -184,9 +188,3 @@ def make_daemons_running(cephadm_module, service_name):
     own_dds = cephadm_module.cache.get_daemons_by_service(service_name)
     for dd in own_dds:
         dd.status = DaemonDescriptionStatus.running  # We're changing the reference
-
-
-def _deploy_cephadm_binary(host):
-    def foo(*args, **kwargs):
-        return True
-    return foo

@@ -39,8 +39,8 @@ def cherrypy_filter(record: logging.LogRecord) -> int:
     return not any([m for m in blocked if m in msg])
 
 
-logging.getLogger('cherrypy.access').addFilter(cherrypy_filter)
 logging.getLogger('cherrypy.error').addFilter(cherrypy_filter)
+cherrypy.log.access_log.propagate = False
 
 
 class CherryPyThread(threading.Thread):
@@ -80,9 +80,9 @@ class CherryPyThread(threading.Thread):
             root_conf = {'/': {'request.dispatch': cherrypy.dispatch.MethodDispatcher(),
                                'tools.response_headers.on': True}}
             cherrypy.tree.mount(Root(self.mgr), '/', root_conf)
-            self.mgr.log.info('Starting cherrypy engine...')
+            self.mgr.log.debug('Starting cherrypy engine...')
             self.start_engine()
-            self.mgr.log.info('Cherrypy engine started.')
+            self.mgr.log.debug('Cherrypy engine started.')
             agents_down = []
             for h in self.mgr.cache.get_hosts():
                 if self.mgr.agent_helpers._check_agent(h):
@@ -92,7 +92,7 @@ class CherryPyThread(threading.Thread):
             self.cherrypy_shutdown_event.wait()
             self.cherrypy_shutdown_event.clear()
             cherrypy.engine.stop()
-            self.mgr.log.info('Cherrypy engine stopped.')
+            self.mgr.log.debug('Cherrypy engine stopped.')
         except Exception as e:
             self.mgr.log.error(f'Failed to run cephadm cherrypy endpoint: {e}')
 
@@ -101,10 +101,10 @@ class CherryPyThread(threading.Thread):
         while port_connect_attempts < 150:
             try:
                 cherrypy.engine.start()
-                self.mgr.log.info(f'Cephadm endpoint connected to port {self.server_port}')
+                self.mgr.log.debug(f'Cephadm endpoint connected to port {self.server_port}')
                 return
             except cherrypy.process.wspbus.ChannelFailures as e:
-                self.mgr.log.info(
+                self.mgr.log.debug(
                     f'{e}. Trying next port.')
                 self.server_port += 1
                 cherrypy.server.httpserver = None
@@ -116,7 +116,7 @@ class CherryPyThread(threading.Thread):
             'Cephadm Endpoint could not find free port in range 7150-7300 and failed to start')
 
     def shutdown(self) -> None:
-        self.mgr.log.info('Stopping cherrypy engine...')
+        self.mgr.log.debug('Stopping cherrypy engine...')
         self.cherrypy_shutdown_event.set()
 
 
@@ -220,7 +220,7 @@ class HostData:
                 # we got old counter value with message, inform agent of new timestamp
                 if not self.mgr.cache.messaging_agent(host):
                     self.mgr.agent_helpers._request_agent_acks({host})
-                self.mgr.log.info(
+                self.mgr.log.debug(
                     f'Received old metadata from agent on host {host}. Requested up-to-date metadata.')
 
             if 'ls' in data and data['ls']:
@@ -238,7 +238,7 @@ class HostData:
                 error_daemons_old != set([dd.name() for dd in self.mgr.cache.get_error_daemons()])
                 or daemon_count_old != len(self.mgr.cache.get_daemons_by_host(host))
             ):
-                self.mgr.log.info(
+                self.mgr.log.debug(
                     f'Change detected in state of daemons from {host} agent metadata. Kicking serve loop')
                 self.mgr._kick_serve_loop()
 
@@ -246,10 +246,10 @@ class HostData:
                 was_out_of_date = not self.mgr.cache.all_host_metadata_up_to_date()
                 self.mgr.cache.metadata_up_to_date[host] = True
                 if was_out_of_date and self.mgr.cache.all_host_metadata_up_to_date():
-                    self.mgr.log.info(
+                    self.mgr.log.debug(
                         'New metadata from agent has made all hosts up to date. Kicking serve loop')
                     self.mgr._kick_serve_loop()
-                self.mgr.log.info(
+                self.mgr.log.debug(
                     f'Received up-to-date metadata from agent on host {host}.')
 
         except Exception as e:
@@ -267,7 +267,7 @@ class AgentMessageThread(threading.Thread):
         super(AgentMessageThread, self).__init__(target=self.run)
 
     def run(self) -> None:
-        self.mgr.log.info(f'Sending message to agent on host {self.host}')
+        self.mgr.log.debug(f'Sending message to agent on host {self.host}')
         self.mgr.cache.sending_agent_message[self.host] = True
         try:
             assert self.mgr.cherrypy_thread
@@ -316,7 +316,7 @@ class AgentMessageThread(threading.Thread):
                 msg = (bytes_len + self.data)
                 secure_agent_socket.sendall(msg.encode('utf-8'))
                 agent_response = secure_agent_socket.recv(1024).decode()
-                self.mgr.log.info(f'Received "{agent_response}" from agent on host {self.host}')
+                self.mgr.log.debug(f'Received "{agent_response}" from agent on host {self.host}')
                 self.mgr.cache.sending_agent_message[self.host] = False
                 return
             except ConnectionError as e:
@@ -371,9 +371,10 @@ class CephadmAgentHelpers:
             self.mgr.cache.agent_timestamp[host] = datetime_now()
             if host in self.mgr.offline_hosts:
                 return False
-        # agent hasn't reported in 2.5 * it's refresh rate. Something is likely wrong with it.
+        # agent hasn't reported in down multiplier * it's refresh rate. Something is likely wrong with it.
+        down_mult: float = max(self.mgr.agent_down_multiplier, 1.5)
         time_diff = datetime_now() - self.mgr.cache.agent_timestamp[host]
-        if time_diff.total_seconds() > 2.5 * float(self.mgr.agent_refresh_rate):
+        if time_diff.total_seconds() > down_mult * float(self.mgr.agent_refresh_rate):
             return True
         return False
 
@@ -381,9 +382,10 @@ class CephadmAgentHelpers:
         self.mgr.remove_health_warning('CEPHADM_AGENT_DOWN')
         if down_agent_hosts:
             detail: List[str] = []
+            down_mult: float = max(self.mgr.agent_down_multiplier, 1.5)
             for agent in down_agent_hosts:
                 detail.append((f'Cephadm agent on host {agent} has not reported in '
-                              f'{2.5 * self.mgr.agent_refresh_rate} seconds. Agent is assumed '
+                              f'{down_mult * self.mgr.agent_refresh_rate} seconds. Agent is assumed '
                                'down and host may be offline.'))
             for dd in [d for d in self.mgr.cache.get_daemons_by_type('agent') if d.hostname in down_agent_hosts]:
                 dd.status = DaemonDescriptionStatus.error

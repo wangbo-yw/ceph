@@ -17,6 +17,7 @@
 
 #include "rgw_user.h"
 #include "rgw_notify_event_type.h"
+#include "common/tracer.h"
 
 class RGWGetDataCB;
 struct RGWObjState;
@@ -243,6 +244,10 @@ class Store {
     Store() {}
     virtual ~Store() = default;
 
+    /** Name of this store provider (e.g., RADOS") */
+    virtual const char* get_name() const = 0;
+    /** Get cluster unique identifier */
+    virtual std::string get_cluster_id(const DoutPrefixProvider* dpp,  optional_yield y) = 0;
     /** Get a User from a rgw_user.  Does not query store for user info, so quick */
     virtual std::unique_ptr<User> get_user(const rgw_user& u) = 0;
     /** Lookup a User by access key.  Queries store for user info. */
@@ -1141,7 +1146,7 @@ class MultipartUpload {
 protected:
   Bucket* bucket;
   std::map<uint32_t, std::unique_ptr<MultipartPart>> parts;
-
+  jspan_context trace_ctx{false, false};
 public:
   MultipartUpload(Bucket* _bucket) : bucket(_bucket) {}
   virtual ~MultipartUpload() = default;
@@ -1159,6 +1164,9 @@ public:
 
   /** Get all the cached parts that make up this upload */
   std::map<uint32_t, std::unique_ptr<MultipartPart>>& get_parts() { return parts; }
+
+  /** Get the trace context of this upload */
+  const jspan_context& get_trace() { return trace_ctx; }
 
   /** Get the Object that represents this upload */
   virtual std::unique_ptr<rgw::sal::Object> get_meta_obj() = 0;

@@ -384,6 +384,24 @@ public:
   using init_cached_extent_ret = init_cached_extent_iertr::future<CachedExtentRef>;
   init_cached_extent_ret init_cached_extent(op_context_t c, CachedExtentRef e);
 
+  /// get_leaf_if_live: get leaf node at laddr/addr if still live
+  using get_leaf_if_live_iertr = base_iertr;
+  using get_leaf_if_live_ret = get_leaf_if_live_iertr::future<CachedExtentRef>;
+  get_leaf_if_live_ret get_leaf_if_live(
+    op_context_t c,
+    paddr_t addr,
+    laddr_t laddr,
+    segment_off_t len);
+
+  /// get_internal_if_live: get internal node at laddr/addr if still live
+  using get_internal_if_live_iertr = base_iertr;
+  using get_internal_if_live_ret = get_internal_if_live_iertr::future<CachedExtentRef>;
+  get_internal_if_live_ret get_internal_if_live(
+    op_context_t c,
+    paddr_t addr,
+    laddr_t laddr,
+    segment_off_t len);
+
   /**
    * rewrite_lba_extent
    *
@@ -403,13 +421,17 @@ private:
   static get_internal_node_ret get_internal_node(
     op_context_t c,
     depth_t depth,
-    paddr_t offset);
+    paddr_t offset,
+    laddr_t begin,
+    laddr_t end);
 
   using get_leaf_node_iertr = base_iertr;
   using get_leaf_node_ret = get_leaf_node_iertr::future<LBALeafNodeRef>;
   static get_leaf_node_ret get_leaf_node(
     op_context_t c,
-    paddr_t offset);
+    paddr_t offset,
+    laddr_t begin,
+    laddr_t end);
 
   using lookup_root_iertr = base_iertr;
   using lookup_root_ret = lookup_root_iertr::future<>;
@@ -421,7 +443,9 @@ private:
       return get_internal_node(
 	c,
 	root.get_depth(),
-	root.get_location()
+	root.get_location(),
+	0,
+	L_ADDR_MAX
       ).si_then([this, visitor, &iter](LBAInternalNodeRef root_node) {
 	iter.get_internal(root.get_depth()).node = root_node;
 	if (visitor) (*visitor)(root_node->get_paddr(), root_node->get_length());
@@ -430,7 +454,9 @@ private:
     } else {
       return get_leaf_node(
 	c,
-	root.get_location()
+	root.get_location(),
+	0,
+	L_ADDR_MAX
       ).si_then([visitor, &iter](LBALeafNodeRef root_node) {
 	iter.leaf.node = root_node;
 	if (visitor) (*visitor)(root_node->get_paddr(), root_node->get_length());
@@ -453,10 +479,17 @@ private:
     auto &parent_entry = iter.get_internal(depth + 1);
     auto parent = parent_entry.node;
     auto node_iter = parent->iter_idx(parent_entry.pos);
+    auto next_iter = node_iter + 1;
+    auto begin = node_iter->get_key();
+    auto end = next_iter == parent->end()
+      ? parent->get_node_meta().end
+      : next_iter->get_key();
     return get_internal_node(
       c,
       depth,
-      node_iter->get_val().maybe_relative_to(parent->get_paddr())
+      node_iter->get_val().maybe_relative_to(parent->get_paddr()),
+      begin,
+      end
     ).si_then([depth, visitor, &iter, &f](LBAInternalNodeRef node) {
       auto &entry = iter.get_internal(depth);
       entry.node = node;
@@ -481,10 +514,17 @@ private:
     auto parent = parent_entry.node;
     assert(parent);
     auto node_iter = parent->iter_idx(parent_entry.pos);
+    auto next_iter = node_iter + 1;
+    auto begin = node_iter->get_key();
+    auto end = next_iter == parent->end()
+      ? parent->get_node_meta().end
+      : next_iter->get_key();
 
     return get_leaf_node(
       c,
-      node_iter->get_val().maybe_relative_to(parent->get_paddr())
+      node_iter->get_val().maybe_relative_to(parent->get_paddr()),
+      begin,
+      end
     ).si_then([visitor, &iter, &f](LBALeafNodeRef node) {
       iter.leaf.node = node;
       auto node_iter = f(*node);
@@ -657,7 +697,9 @@ private:
   friend base_iertr::future<typename NodeType::Ref> get_node(
     op_context_t c,
     depth_t depth,
-    paddr_t addr);
+    paddr_t addr,
+    laddr_t begin,
+    laddr_t end);
 
   template <typename NodeType>
   friend handle_merge_ret merge_level(

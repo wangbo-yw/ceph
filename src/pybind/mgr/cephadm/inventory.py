@@ -142,14 +142,6 @@ class Inventory:
         self.assert_host(host)
         return self._inventory[host].get('addr', host)
 
-    def filter_by_label(self, label: Optional[str] = '', as_hostspec: bool = False) -> Iterator:
-        for h, hostspec in self._inventory.items():
-            if not label or label in hostspec.get('labels', []):
-                if as_hostspec:
-                    yield self.spec_from_dict(hostspec)
-                else:
-                    yield h
-
     def spec_from_dict(self, info: dict) -> HostSpec:
         hostname = info['hostname']
         return HostSpec(
@@ -755,10 +747,7 @@ class HostCache():
 
     def get_hosts(self):
         # type: () -> List[str]
-        r = []
-        for host, di in self.daemons.items():
-            r.append(host)
-        return r
+        return list(self.daemons)
 
     def get_schedulable_hosts(self) -> List[HostSpec]:
         """
@@ -810,7 +799,7 @@ class HostCache():
         return self.facts.get(host, {})
 
     def _get_daemons(self) -> Iterator[orchestrator.DaemonDescription]:
-        for dm in self.daemons.values():
+        for dm in self.daemons.copy().values():
             yield from dm.values()
 
     def get_daemons(self):
@@ -819,10 +808,9 @@ class HostCache():
 
     def get_error_daemons(self) -> List[orchestrator.DaemonDescription]:
         r = []
-        for host, dm in self.daemons.items():
-            for name, dd in dm.items():
-                if dd.status is not None and dd.status == orchestrator.DaemonDescriptionStatus.error:
-                    r.append(dd)
+        for dd in self._get_daemons():
+            if dd.status is not None and dd.status == orchestrator.DaemonDescriptionStatus.error:
+                r.append(dd)
         return r
 
     def get_daemons_by_host(self, host: str) -> List[orchestrator.DaemonDescription]:
@@ -857,7 +845,7 @@ class HostCache():
             dd.events = self.mgr.events.get_for_daemon(dd.name())
             return dd
 
-        for host, dm in self.daemons.items():
+        for host, dm in self.daemons.copy().items():
             yield host, {name: alter(host, d) for name, d in dm.items()}
 
     def get_daemons_by_service(self, service_name):
@@ -870,30 +858,17 @@ class HostCache():
     def get_daemons_by_type(self, service_type: str, host: str = '') -> List[orchestrator.DaemonDescription]:
         assert service_type not in ['keepalived', 'haproxy']
 
-        result = []   # type: List[orchestrator.DaemonDescription]
-        for h, dm in self.daemons.items():
-            if host and h != host:
-                continue
-            for name, d in dm.items():
-                if d.daemon_type in service_to_daemon_types(service_type):
-                    result.append(d)
-        return result
+        daemons = self.daemons[host].values() if host else self._get_daemons()
 
-    def get_daemon_types(self, hostname: str) -> List[str]:
+        return [d for d in daemons if d.daemon_type in service_to_daemon_types(service_type)]
+
+    def get_daemon_types(self, hostname: str) -> Set[str]:
         """Provide a list of the types of daemons on the host"""
-        result = set()
-        for _d, dm in self.daemons[hostname].items():
-            assert dm.daemon_type is not None, f'no daemon type for {dm!r}'
-            result.add(dm.daemon_type)
-        return list(result)
+        return cast(Set[str], {d.daemon_type for d in self.daemons[hostname].values()})
 
     def get_daemon_names(self):
         # type: () -> List[str]
-        r = []
-        for host, dm in self.daemons.items():
-            for name, dd in dm.items():
-                r.append(name)
-        return r
+        return [d.name() for d in self._get_daemons()]
 
     def get_daemon_last_config_deps(self, host: str, name: str) -> Tuple[Optional[List[str]], Optional[datetime.datetime]]:
         if host in self.daemon_config_deps:
@@ -1089,12 +1064,15 @@ class HostCache():
             self.scheduled_daemon_actions[host] = {}
         self.scheduled_daemon_actions[host][daemon_name] = action
 
-    def rm_scheduled_daemon_action(self, host: str, daemon_name: str) -> None:
+    def rm_scheduled_daemon_action(self, host: str, daemon_name: str) -> bool:
+        found = False
         if host in self.scheduled_daemon_actions:
             if daemon_name in self.scheduled_daemon_actions[host]:
                 del self.scheduled_daemon_actions[host][daemon_name]
+                found = True
             if not self.scheduled_daemon_actions[host]:
                 del self.scheduled_daemon_actions[host]
+        return found
 
     def get_scheduled_daemon_action(self, host: str, daemon: str) -> Optional[str]:
         assert not daemon.startswith('ha-rgw.')

@@ -78,6 +78,12 @@
   `SCRUB_SCHEDULING` conveys whether a PG is scheduled to be scrubbed at a specified
   time, queued for scrubbing, or being scrubbed.
 
+* A health warning will now be reported if the ``require-osd-release`` flag is not
+  set to the appropriate release after a cluster upgrade.
+
+* LevelDB support has been removed. ``WITH_LEVELDB`` is no longer a supported
+  build option.
+
 >=16.0.0
 --------
 * mgr/nfs: ``nfs`` module is moved out of volumes plugin. Prior using the

@@ -3,6 +3,7 @@
 
 #include "crimson/os/seastore/cache.h"
 
+#include <sstream>
 #include <string_view>
 
 #include "crimson/os/seastore/logging.h"
@@ -106,7 +107,8 @@ void Cache::register_metrics()
   std::map<src_t, sm::label_instance> labels_by_src {
     {src_t::MUTATE,  src_label("MUTATE")},
     {src_t::READ,    src_label("READ")},
-    {src_t::CLEANER, src_label("CLEANER")},
+    {src_t::CLEANER_TRIM, src_label("CLEANER_TRIM")},
+    {src_t::CLEANER_RECLAIM, src_label("CLEANER_RECLAIM")},
   };
 
   auto ext_label = sm::label("ext");
@@ -271,9 +273,9 @@ void Cache::register_metrics()
             {src_label}
           ),
           sm::make_counter(
-            "invalidated_ool_record_overhead_bytes",
-            efforts.ool_record_overhead_bytes,
-            sm::description("bytes of ool-record overhead from invalidated transactions"),
+            "invalidated_ool_record_bytes",
+            efforts.ool_record_bytes,
+            sm::description("bytes of ool-record from invalidated transactions"),
             {src_label}
           ),
         }
@@ -311,15 +313,28 @@ void Cache::register_metrics()
             {src_label}
           ),
           sm::make_counter(
-            "committed_ool_record_overhead_bytes",
-            efforts.ool_record_overhead_bytes,
-            sm::description("bytes of ool-record overhead from committed transactions"),
+            "committed_ool_record_padding_bytes",
+            efforts.ool_record_padding_bytes,
+            sm::description("bytes of ool-record padding from committed transactions"),
             {src_label}
           ),
           sm::make_counter(
-            "committed_inline_record_overhead_bytes",
-            efforts.inline_record_overhead_bytes,
-            sm::description("bytes of inline-record overhead from committed transactions"),
+            "committed_ool_record_metadata_bytes",
+            efforts.ool_record_metadata_bytes,
+            sm::description("bytes of ool-record metadata from committed transactions"),
+            {src_label}
+          ),
+          sm::make_counter(
+            "committed_ool_record_data_bytes",
+            efforts.ool_record_data_bytes,
+            sm::description("bytes of ool-record data from committed transactions"),
+            {src_label}
+          ),
+          sm::make_counter(
+            "committed_inline_record_metadata_bytes",
+            efforts.inline_record_metadata_bytes,
+            sm::description("bytes of inline-record metadata from committed transactions"
+                            "(excludes delta buffer)"),
             {src_label}
           ),
         }
@@ -405,52 +420,6 @@ void Cache::register_metrics()
   }
 
   /**
-   * Record header fullness
-   */
-  auto record_type_label = sm::label("record_type");
-  using namespace std::literals::string_view_literals;
-  const string_view record_type_names[] = {
-    "INLINE"sv,
-    "OOL"sv,
-  };
-  for (auto& [src, src_label] : labels_by_src) {
-    if (src == src_t::READ) {
-      // READ transaction won't commit
-      continue;
-    }
-    auto& record_header_fullness = get_by_src(
-        stats.record_header_fullness_by_src, src);
-    for (auto& record_type_name : record_type_names) {
-      auto& fill_stat = [&record_type_name,
-                         &record_header_fullness]() -> fill_stat_t& {
-        if (record_type_name == "INLINE") {
-          return record_header_fullness.inline_stats;
-        } else {
-          assert(record_type_name == "OOL");
-          return record_header_fullness.ool_stats;
-        }
-      }();
-      metrics.add_group(
-        "cache",
-        {
-          sm::make_counter(
-            "record_header_filled_bytes",
-            fill_stat.filled_bytes,
-            sm::description("filled bytes of record header"),
-            {src_label, record_type_label(record_type_name)}
-          ),
-          sm::make_counter(
-            "record_header_total_bytes",
-            fill_stat.total_bytes,
-            sm::description("total bytes of record header"),
-            {src_label, record_type_label(record_type_name)}
-          ),
-        }
-      );
-    }
-  }
-
-  /**
    * Cached extents (including placeholders)
    *
    * Dirty extents
@@ -514,7 +483,9 @@ void Cache::register_metrics()
         // READ transaction won't contain any tree inserts and erases
         continue;
       }
-      if (src == src_t::CLEANER && tree_label == onode_label) {
+      if ((src == src_t::CLEANER_TRIM ||
+           src == src_t::CLEANER_RECLAIM) &&
+          tree_label == onode_label) {
         // CLEANER transaction won't contain any onode tree operations
         continue;
       }
@@ -561,6 +532,64 @@ void Cache::register_metrics()
       stats.lba_tree_depth,
       stats.committed_lba_tree_efforts,
       stats.invalidated_lba_tree_efforts);
+
+  /**
+   * conflict combinations
+   */
+  auto srcs_label = sm::label("srcs");
+  auto num_srcs = static_cast<std::size_t>(Transaction::src_t::MAX);
+  std::size_t srcs_index = 0;
+  for (uint8_t src2_int = 0; src2_int < num_srcs; ++src2_int) {
+    auto src2 = static_cast<Transaction::src_t>(src2_int);
+    for (uint8_t src1_int = src2_int; src1_int < num_srcs; ++src1_int) {
+      ++srcs_index;
+      auto src1 = static_cast<Transaction::src_t>(src1_int);
+      // impossible combinations
+      // should be consistent with checks in account_conflict()
+      if ((src1 == Transaction::src_t::READ &&
+           src2 == Transaction::src_t::READ) ||
+          (src1 == Transaction::src_t::CLEANER_TRIM &&
+           src2 == Transaction::src_t::CLEANER_TRIM) ||
+          (src1 == Transaction::src_t::CLEANER_RECLAIM &&
+           src2 == Transaction::src_t::CLEANER_RECLAIM) ||
+          (src1 == Transaction::src_t::CLEANER_TRIM &&
+           src2 == Transaction::src_t::CLEANER_RECLAIM)) {
+        continue;
+      }
+      std::ostringstream oss;
+      oss << src1 << "," << src2;
+      metrics.add_group(
+        "cache",
+        {
+          sm::make_counter(
+            "trans_srcs_invalidated",
+            stats.trans_conflicts_by_srcs[srcs_index - 1],
+            sm::description("total number conflicted transactions by src pair"),
+            {srcs_label(oss.str())}
+          ),
+        }
+      );
+    }
+  }
+  assert(srcs_index == NUM_SRC_COMB);
+  srcs_index = 0;
+  for (uint8_t src_int = 0; src_int < num_srcs; ++src_int) {
+    ++srcs_index;
+    auto src = static_cast<Transaction::src_t>(src_int);
+    std::ostringstream oss;
+    oss << "UNKNOWN," << src;
+    metrics.add_group(
+      "cache",
+      {
+        sm::make_counter(
+          "trans_srcs_invalidated",
+          stats.trans_conflicts_by_unknown[srcs_index - 1],
+          sm::description("total number conflicted transactions by src pair"),
+          {srcs_label(oss.str())}
+        ),
+      }
+    );
+  }
 }
 
 void Cache::add_extent(CachedExtentRef ref)
@@ -621,23 +650,28 @@ void Cache::remove_extent(CachedExtentRef ref)
   extents.erase(*ref);
 }
 
-void Cache::retire_extent(CachedExtentRef ref)
+void Cache::commit_retire_extent(
+    Transaction& t,
+    CachedExtentRef ref)
 {
-  LOG_PREFIX(Cache::retire_extent);
-  DEBUG("extent {}", *ref);
+  LOG_PREFIX(Cache::commit_retire_extent);
+  DEBUGT("extent {}", t, *ref);
   assert(ref->is_valid());
 
   remove_from_dirty(ref);
   ref->dirty_from_or_retired_at = JOURNAL_SEQ_MAX;
 
-  invalidate_extent(*ref);
+  invalidate_extent(t, *ref);
   extents.erase(*ref);
 }
 
-void Cache::replace_extent(CachedExtentRef next, CachedExtentRef prev)
+void Cache::commit_replace_extent(
+    Transaction& t,
+    CachedExtentRef next,
+    CachedExtentRef prev)
 {
-  LOG_PREFIX(Cache::replace_extent);
-  DEBUG("prev {}, next {}", *prev, *next);
+  LOG_PREFIX(Cache::commit_replace_extent);
+  DEBUGT("prev {}, next {}", t, *prev, *next);
   assert(next->get_paddr() == prev->get_paddr());
   assert(next->version == prev->version + 1);
   extents.replace(*next, *prev);
@@ -663,20 +697,23 @@ void Cache::replace_extent(CachedExtentRef next, CachedExtentRef prev)
     add_to_dirty(next);
   }
 
-  invalidate_extent(*prev);
+  invalidate_extent(t, *prev);
 }
 
-void Cache::invalidate_extent(CachedExtent &extent)
+void Cache::invalidate_extent(
+    Transaction& t,
+    CachedExtent& extent)
 {
   LOG_PREFIX(Cache::invalidate);
-  DEBUG("conflict begin -- extent {}", extent);
+  DEBUGT("conflict begin -- extent {}", t, extent);
   for (auto &&i: extent.transactions) {
     if (!i.t->conflicted) {
       assert(!i.t->is_weak());
+      account_conflict(t.get_src(), i.t->get_src());
       mark_transaction_conflicted(*i.t, extent);
     }
   }
-  DEBUG("conflict end");
+  DEBUGT("conflict end", t);
   extent.state = CachedExtent::extent_state_t::INVALID;
 }
 
@@ -723,14 +760,12 @@ void Cache::mark_transaction_conflicted(
     efforts.fresh_ool_written.extents += ool_stats.extents.num;
     efforts.fresh_ool_written.bytes += ool_stats.extents.bytes;
     efforts.num_ool_records += ool_stats.num_records;
-    efforts.ool_record_overhead_bytes += ool_stats.header_bytes;
+    efforts.ool_record_bytes +=
+      (ool_stats.header_bytes + ool_stats.data_bytes);
+    // Note: we only account overhead from committed ool records
 
-    auto& record_header_fullness = get_by_src(
-        stats.record_header_fullness_by_src, t.get_src());
-    record_header_fullness.ool_stats.filled_bytes += ool_stats.header_raw_bytes;
-    record_header_fullness.ool_stats.total_bytes += ool_stats.header_bytes;
-
-    if (t.get_src() == Transaction::src_t::CLEANER) {
+    if (t.get_src() == Transaction::src_t::CLEANER_TRIM ||
+        t.get_src() == Transaction::src_t::CLEANER_RECLAIM) {
       // CLEANER transaction won't contain any onode tree operations
       assert(t.onode_tree_stats.is_clear());
     } else {
@@ -743,9 +778,9 @@ void Cache::mark_transaction_conflicted(
   } else {
     // read transaction won't have non-read efforts
     assert(t.retired_set.empty());
-    assert(t.get_fresh_block_stats().num == 0);
+    assert(t.get_fresh_block_stats().is_clear());
     assert(t.mutated_block_list.empty());
-    assert(t.get_ool_write_stats().num_records == 0);
+    assert(t.get_ool_write_stats().is_clear());
     assert(t.onode_tree_stats.is_clear());
     assert(t.lba_tree_stats.is_clear());
   }
@@ -846,26 +881,8 @@ record_t Cache::prepare_record(Transaction &t)
   assert(!t.is_weak());
   assert(t.get_src() != Transaction::src_t::READ);
 
-  if (t.get_src() == Transaction::src_t::CLEANER) {
-    // CLEANER transaction won't contain any onode tree operations
-    assert(t.onode_tree_stats.is_clear());
-  } else {
-    if (t.onode_tree_stats.depth) {
-      stats.onode_tree_depth = t.onode_tree_stats.depth;
-    }
-    get_by_src(stats.committed_onode_tree_efforts, t.get_src()
-        ).increment(t.onode_tree_stats);
-  }
-
-  if (t.lba_tree_stats.depth) {
-    stats.lba_tree_depth = t.lba_tree_stats.depth;
-  }
-  get_by_src(stats.committed_lba_tree_efforts, t.get_src()
-      ).increment(t.lba_tree_stats);
-
   auto& efforts = get_by_src(stats.committed_efforts_by_src,
                              t.get_src());
-  ++(efforts.num_trans);
 
   // Should be valid due to interruptible future
   for (auto &i: t.read_set) {
@@ -895,7 +912,7 @@ record_t Cache::prepare_record(Transaction &t)
                i->get_type()).increment(i->get_length());
 
     assert(i->prior_instance);
-    replace_extent(i, i->prior_instance);
+    commit_replace_extent(t, i, i->prior_instance);
 
     i->prepare_write();
     i->set_io_wait();
@@ -905,7 +922,7 @@ record_t Cache::prepare_record(Transaction &t)
     if (i->get_type() == extent_types_t::ROOT) {
       root = t.root;
       DEBUGT("writing out root delta for {}", t, *t.root);
-      record.deltas.push_back(
+      record.push_back(
 	delta_info_t{
 	  extent_types_t::ROOT,
 	  paddr_t{},
@@ -917,7 +934,7 @@ record_t Cache::prepare_record(Transaction &t)
 	  t.root->get_delta()
 	});
     } else {
-      record.deltas.push_back(
+      record.push_back(
 	delta_info_t{
 	  i->get_type(),
 	  i->get_paddr(),
@@ -944,7 +961,7 @@ record_t Cache::prepare_record(Transaction &t)
     DEBUGT("retiring {}", t, *i);
     get_by_ext(efforts.retire_by_ext,
                i->get_type()).increment(i->get_length());
-    retire_extent(i);
+    commit_retire_extent(t, i);
     if (i->backend_type == device_type_t::RANDOM_BLOCK) {
       paddr_t paddr = i->get_paddr();
       rbm_alloc_delta_t delta;
@@ -975,7 +992,7 @@ record_t Cache::prepare_record(Transaction &t)
     }
 
     assert(bl.length() == i->get_length());
-    record.extents.push_back(extent_t{
+    record.push_back(extent_t{
 	i->get_type(),
 	i->is_logical()
 	? i->cast<LogicalCachedExtent>()->get_laddr()
@@ -990,7 +1007,7 @@ record_t Cache::prepare_record(Transaction &t)
     delta_info_t delta;
     delta.type = extent_types_t::RBM_ALLOC_INFO;
     delta.bl = bl;
-    record.deltas.push_back(delta);
+    record.push_back(std::move(delta));
   }
 
   for (auto &i: t.ool_block_list) {
@@ -1007,21 +1024,52 @@ record_t Cache::prepare_record(Transaction &t)
 
   auto& ool_stats = t.get_ool_write_stats();
   ceph_assert(ool_stats.extents.num == t.ool_block_list.size());
-  efforts.num_ool_records += ool_stats.num_records;
-  efforts.ool_record_overhead_bytes += ool_stats.header_bytes;
 
-  auto& record_header_fullness = get_by_src(
-      stats.record_header_fullness_by_src, t.get_src());
-  record_header_fullness.ool_stats.filled_bytes += ool_stats.header_raw_bytes;
-  record_header_fullness.ool_stats.total_bytes += ool_stats.header_bytes;
+  // FIXME: prevent submitting empty records
+  if (record.is_empty()) {
+    ERRORT("record is empty!", t);
+    assert(t.onode_tree_stats.is_clear());
+    assert(t.lba_tree_stats.is_clear());
+    assert(ool_stats.is_clear());
+    ++(efforts.num_trans);
+  } else {
+    DEBUGT("record is ready to submit, src={}, mdsize={}, dsize={}; "
+           "{} ool records, mdsize={}, dsize={}, fillness={}",
+           t, t.get_src(),
+           record.size.get_raw_mdlength(),
+           record.size.dlength,
+           ool_stats.num_records,
+           ool_stats.header_raw_bytes,
+           ool_stats.data_bytes,
+           ((double)(ool_stats.header_raw_bytes + ool_stats.data_bytes) /
+            (ool_stats.header_bytes + ool_stats.data_bytes)));
+    if (t.get_src() == Transaction::src_t::CLEANER_TRIM ||
+        t.get_src() == Transaction::src_t::CLEANER_RECLAIM) {
+      // CLEANER transaction won't contain any onode tree operations
+      assert(t.onode_tree_stats.is_clear());
+    } else {
+      if (t.onode_tree_stats.depth) {
+        stats.onode_tree_depth = t.onode_tree_stats.depth;
+      }
+      get_by_src(stats.committed_onode_tree_efforts, t.get_src()
+          ).increment(t.onode_tree_stats);
+    }
 
-  auto record_size = get_encoded_record_length(
-      record, reader.get_block_size());
-  auto inline_overhead =
-      record_size.mdlength + record_size.dlength - record.get_raw_data_size();
-  efforts.inline_record_overhead_bytes += inline_overhead;
-  record_header_fullness.inline_stats.filled_bytes += record_size.raw_mdlength;
-  record_header_fullness.inline_stats.total_bytes += record_size.mdlength;
+    if (t.lba_tree_stats.depth) {
+      stats.lba_tree_depth = t.lba_tree_stats.depth;
+    }
+    get_by_src(stats.committed_lba_tree_efforts, t.get_src()
+        ).increment(t.lba_tree_stats);
+
+    ++(efforts.num_trans);
+    efforts.num_ool_records += ool_stats.num_records;
+    efforts.ool_record_padding_bytes +=
+      (ool_stats.header_bytes - ool_stats.header_raw_bytes);
+    efforts.ool_record_metadata_bytes += ool_stats.header_raw_bytes;
+    efforts.ool_record_data_bytes += ool_stats.data_bytes;
+    efforts.inline_record_metadata_bytes +=
+      (record.size.get_raw_mdlength() - record.get_delta_size());
+  }
 
   return record;
 }
@@ -1161,12 +1209,13 @@ Cache::replay_delta(
     };
     auto extent_fut = (delta.pversion == 0 ?
       // replay is not included by the cache hit metrics
-      get_extent_by_type(
+      _get_extent_by_type(
         delta.type,
         delta.paddr,
         delta.laddr,
         delta.length,
-        nullptr) :
+        nullptr,
+        [](CachedExtent &) {}) :
       _get_extent_if_cached(
 	delta.paddr)
     ).handle_error(
@@ -1239,6 +1288,7 @@ Cache::get_next_dirty_extents_ret Cache::get_next_dirty_extents(
 	    ext->wait_io()
 	  ).then_interruptible([FNAME, this, ext, &t, &ret] {
 	    if (!ext->is_valid()) {
+	      ++(get_by_src(stats.trans_conflicts_by_unknown, t.get_src()));
 	      mark_transaction_conflicted(t, *ext);
 	      return;
 	    }
@@ -1286,6 +1336,7 @@ Cache::get_root_ret Cache::get_root(Transaction &t)
       DEBUGT("got root read {}", t, *ret);
       if (!ret->is_valid()) {
 	DEBUGT("root became invalid: {}", t, *ret);
+	++(get_by_src(stats.trans_conflicts_by_unknown, t.get_src()));
 	mark_transaction_conflicted(t, *ret);
 	return get_root_iertr::make_ready_future<RootBlockRef>();
       } else {
@@ -1298,14 +1349,15 @@ Cache::get_root_ret Cache::get_root(Transaction &t)
   }
 }
 
-Cache::get_extent_ertr::future<CachedExtentRef> Cache::get_extent_by_type(
+Cache::get_extent_ertr::future<CachedExtentRef> Cache::_get_extent_by_type(
   extent_types_t type,
   paddr_t offset,
   laddr_t laddr,
   segment_off_t length,
-  const Transaction::src_t* p_src)
+  const Transaction::src_t* p_src,
+  extent_init_func_t &&extent_init_func)
 {
-  return [=] {
+  return [=, extent_init_func=std::move(extent_init_func)]() mutable {
     src_ext_t* p_metric_key = nullptr;
     src_ext_t metric_key;
     if (p_src) {
@@ -1319,43 +1371,43 @@ Cache::get_extent_ertr::future<CachedExtentRef> Cache::get_extent_by_type(
       return get_extent_ertr::make_ready_future<CachedExtentRef>();
     case extent_types_t::LADDR_INTERNAL:
       return get_extent<lba_manager::btree::LBAInternalNode>(
-          offset, length, p_metric_key
+	offset, length, p_metric_key, std::move(extent_init_func)
       ).safe_then([](auto extent) {
 	return CachedExtentRef(extent.detach(), false /* add_ref */);
       });
     case extent_types_t::LADDR_LEAF:
       return get_extent<lba_manager::btree::LBALeafNode>(
-          offset, length, p_metric_key
+	offset, length, p_metric_key, std::move(extent_init_func)
       ).safe_then([](auto extent) {
 	return CachedExtentRef(extent.detach(), false /* add_ref */);
       });
     case extent_types_t::OMAP_INNER:
       return get_extent<omap_manager::OMapInnerNode>(
-          offset, length, p_metric_key
+          offset, length, p_metric_key, std::move(extent_init_func)
       ).safe_then([](auto extent) {
         return CachedExtentRef(extent.detach(), false /* add_ref */);
       });
     case extent_types_t::OMAP_LEAF:
       return get_extent<omap_manager::OMapLeafNode>(
-          offset, length, p_metric_key
+          offset, length, p_metric_key, std::move(extent_init_func)
       ).safe_then([](auto extent) {
         return CachedExtentRef(extent.detach(), false /* add_ref */);
       });
     case extent_types_t::COLL_BLOCK:
       return get_extent<collection_manager::CollectionNode>(
-          offset, length, p_metric_key
+          offset, length, p_metric_key, std::move(extent_init_func)
       ).safe_then([](auto extent) {
         return CachedExtentRef(extent.detach(), false /* add_ref */);
       });
     case extent_types_t::ONODE_BLOCK_STAGED:
       return get_extent<onode::SeastoreNodeExtent>(
-          offset, length, p_metric_key
+          offset, length, p_metric_key, std::move(extent_init_func)
       ).safe_then([](auto extent) {
 	return CachedExtentRef(extent.detach(), false /* add_ref */);
       });
     case extent_types_t::OBJECT_DATA_BLOCK:
       return get_extent<ObjectDataBlock>(
-          offset, length, p_metric_key
+          offset, length, p_metric_key, std::move(extent_init_func)
       ).safe_then([](auto extent) {
 	return CachedExtentRef(extent.detach(), false /* add_ref */);
       });
@@ -1364,13 +1416,13 @@ Cache::get_extent_ertr::future<CachedExtentRef> Cache::get_extent_by_type(
       return get_extent_ertr::make_ready_future<CachedExtentRef>();
     case extent_types_t::TEST_BLOCK:
       return get_extent<TestBlock>(
-          offset, length, p_metric_key
+          offset, length, p_metric_key, std::move(extent_init_func)
       ).safe_then([](auto extent) {
 	return CachedExtentRef(extent.detach(), false /* add_ref */);
       });
     case extent_types_t::TEST_BLOCK_PHYSICAL:
       return get_extent<TestBlockPhysical>(
-          offset, length, p_metric_key
+          offset, length, p_metric_key, std::move(extent_init_func)
       ).safe_then([](auto extent) {
 	return CachedExtentRef(extent.detach(), false /* add_ref */);
       });

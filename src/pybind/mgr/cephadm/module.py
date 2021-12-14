@@ -23,7 +23,7 @@ from prettytable import PrettyTable
 from ceph.deployment import inventory
 from ceph.deployment.drive_group import DriveGroupSpec
 from ceph.deployment.service_spec import \
-    ServiceSpec, PlacementSpec, assert_valid_host, \
+    ServiceSpec, PlacementSpec, \
     HostPlacementSpec, IngressSpec
 from ceph.utils import str_to_datetime, datetime_to_str, datetime_now
 from cephadm.serve import CephadmServe
@@ -31,7 +31,7 @@ from cephadm.services.cephadmservice import CephadmDaemonDeploySpec
 from cephadm.agent import CherryPyThread, CephadmAgentHelpers
 
 
-from mgr_module import MgrModule, HandleCommandResult, Option
+from mgr_module import MgrModule, HandleCommandResult, Option, NotifyType
 import orchestrator
 from orchestrator.module import to_format, Format
 
@@ -123,6 +123,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
     _STORE_HOST_PREFIX = "host"
 
     instance = None
+    NOTIFY_TYPES = [NotifyType.mon_map, NotifyType.pg_summary]
     NATIVE_OPTIONS = []  # type: List[Any]
     MODULE_OPTIONS = [
         Option(
@@ -356,6 +357,12 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             desc='First port agent will try to bind to (will also try up to next 1000 subsequent ports if blocked)'
         ),
         Option(
+            'agent_down_multiplier',
+            type='float',
+            default=3.0,
+            desc='Multiplied by agent refresh rate to calculate how long agent must not report before being marked down'
+        ),
+        Option(
             'max_osd_draining_count',
             type='int',
             default=10,
@@ -423,11 +430,13 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             self.ssh_pub: Optional[str] = None
             self.use_agent = False
             self.agent_refresh_rate = 0
+            self.agent_down_multiplier = 0.0
             self.agent_starting_port = 0
             self.apply_spec_fails: List[Tuple[str, str]] = []
             self.max_osd_draining_count = 10
+            self.device_enhanced_scan = False
 
-        self.notify('mon_map', None)
+        self.notify(NotifyType.mon_map, None)
         self.config_notify()
 
         path = self.get_ceph_option('cephadm_path')
@@ -573,8 +582,8 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
 
         self.event.set()
 
-    def notify(self, notify_type: str, notify_id: Optional[str]) -> None:
-        if notify_type == "mon_map":
+    def notify(self, notify_type: NotifyType, notify_id: Optional[str]) -> None:
+        if notify_type == NotifyType.mon_map:
             # get monmap mtime so we can refresh configs when mons change
             monmap = self.get('mon_map')
             self.last_monmap = str_to_datetime(monmap['modified'])
@@ -583,16 +592,19 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             if getattr(self, 'manage_etc_ceph_ceph_conf', False):
                 # getattr, due to notify() being called before config_notify()
                 self._kick_serve_loop()
-        if notify_type == "pg_summary":
+        if notify_type == NotifyType.pg_summary:
             self._trigger_osd_removal()
 
     def _trigger_osd_removal(self) -> None:
+        remove_queue = self.to_remove_osds.as_osd_ids()
+        if not remove_queue:
+            return
         data = self.get("osd_stats")
         for osd in data.get('osd_stats', []):
             if osd.get('num_pgs') == 0:
                 # if _ANY_ osd that is currently in the queue appears to be empty,
                 # start the removal process
-                if int(osd.get('osd')) in self.to_remove_osds.as_osd_ids():
+                if int(osd.get('osd')) in remove_queue:
                     self.log.debug('Found empty osd. Starting removal process')
                     # if the osd that is now empty is also part of the removal queue
                     # start the process
@@ -716,8 +728,6 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             sd.rank = int(d['rank']) if d.get('rank') is not None else None
             sd.rank_generation = int(d['rank_generation']) if d.get(
                 'rank_generation') is not None else None
-            if sd.daemon_type == 'osd':
-                sd.osdspec_affinity = self.osd_service.get_osdspec_affinity(sd.daemon_id)
             if 'state' in d:
                 sd.status_desc = d['state']
                 sd.status = {
@@ -1336,7 +1346,7 @@ Then run the following:
 
         :param host: host name
         """
-        assert_valid_host(spec.hostname)
+        spec.validate()
         ip_addr = self._check_valid_addr(spec.hostname, spec.addr)
         if spec.addr == spec.hostname and ip_addr:
             spec.addr = ip_addr
@@ -1381,13 +1391,15 @@ Then run the following:
         host_offline = host in self.offline_hosts
 
         if host_offline and not offline:
-            return "{} is offline, please use --offline and --force to remove this host. This can potentially cause data loss".format(host)
+            raise OrchestratorValidationError(
+                "{} is offline, please use --offline and --force to remove this host. This can potentially cause data loss".format(host))
 
         if not host_offline and offline:
-            return "{} is online, please remove host without --offline.".format(host)
+            raise OrchestratorValidationError(
+                "{} is online, please remove host without --offline.".format(host))
 
         if offline and not force:
-            return "Removing an offline host requires --force"
+            raise OrchestratorValidationError("Removing an offline host requires --force")
 
         # check if there are daemons on the host
         if not force:
@@ -1401,10 +1413,19 @@ Then run the following:
                 for d in daemons:
                     daemons_table += "{:<20} {:<15}\n".format(d.daemon_type, d.daemon_id)
 
-                return "Not allowed to remove %s from cluster. " \
-                    "The following daemons are running in the host:" \
-                    "\n%s\nPlease run 'ceph orch host drain %s' to remove daemons from host" % (
-                        host, daemons_table, host)
+                raise OrchestratorValidationError("Not allowed to remove %s from cluster. "
+                                                  "The following daemons are running in the host:"
+                                                  "\n%s\nPlease run 'ceph orch host drain %s' to remove daemons from host" % (
+                                                      host, daemons_table, host))
+
+        # check, if there we're removing the last _admin host
+        if not force:
+            p = PlacementSpec(label='_admin')
+            admin_hosts = p.filter_matching_hostspecs(self.inventory.all_specs())
+            if len(admin_hosts) == 1 and admin_hosts[0] == host:
+                raise OrchestratorValidationError(f"Host {host} is the last host with the '_admin'"
+                                                  " label. Please add the '_admin' label to a host"
+                                                  " or add --force to this command")
 
         def run_cmd(cmd_args: dict) -> None:
             ret, out, err = self.mon_command(cmd_args)
@@ -1927,7 +1948,7 @@ Then run the following:
             for h, dm in self.cache.get_daemons_with_volatile_status():
                 osds_to_remove = []
                 for name, dd in dm.items():
-                    if dd.daemon_type == 'osd' and (dd.service_name() == service_name or not dd.osdspec_affinity):
+                    if dd.daemon_type == 'osd' and dd.service_name() == service_name:
                         osds_to_remove.append(str(dd.daemon_id))
                 if osds_to_remove:
                     osds_msg[h] = osds_to_remove
@@ -2216,7 +2237,7 @@ Then run the following:
             except Exception:
                 pass
             deps = sorted([self.get_mgr_ip(), server_port, root_cert,
-                           str(self.get_module_option('device_enhanced_scan'))])
+                           str(self.device_enhanced_scan)])
         elif daemon_type == 'iscsi':
             deps = [self.get_mgr_ip()]
         else:

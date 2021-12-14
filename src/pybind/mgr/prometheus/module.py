@@ -1400,7 +1400,7 @@ class Module(MgrModule):
                 'prometheus_collect_duration_seconds_count',
                 'The amount of metrics gathered for this exporter',
                 ('method',))
-            self.metrics['prometheus_collect_duration_seconds_sum'] = count_metric
+            self.metrics['prometheus_collect_duration_seconds_count'] = count_metric
 
         # Collect all timing data and make it available as metric, excluding the
         # `collect` method because it has not finished at this point and hence
@@ -1674,6 +1674,9 @@ class Module(MgrModule):
 
 
 class StandbyModule(MgrStandbyModule):
+
+    MODULE_OPTIONS = Module.MODULE_OPTIONS
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super(StandbyModule, self).__init__(*args, **kwargs)
         self.shutdown_event = threading.Event()

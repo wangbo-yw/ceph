@@ -141,6 +141,7 @@ class Module(MgrModule):
         self.last_report: Dict[str, Any] = dict()
         self.report_id: Optional[str] = None
         self.salt: Optional[str] = None
+        self.config_update_module_option()
         # for mypy which does not run the code
         if TYPE_CHECKING:
             self.url = ''
@@ -156,12 +157,15 @@ class Module(MgrModule):
             self.channel_device = True
             self.channel_perf = False
 
-    def config_notify(self) -> None:
+    def config_update_module_option(self) -> None:
         for opt in self.MODULE_OPTIONS:
             setattr(self,
                     opt['name'],
                     self.get_module_option(opt['name']))
             self.log.debug(' %s = %s', opt['name'], getattr(self, opt['name']))
+
+    def config_notify(self) -> None:
+        self.config_update_module_option()
         # wake up serve() thread
         self.event.set()
 
@@ -900,19 +904,12 @@ class Module(MgrModule):
             report['crashes'] = self.gather_crashinfo()
 
         if 'perf' in channels:
-            report['perf_counters_aggregated'] = self.gather_perf_counters('aggregated')
-            report['perf_counters_separated'] = self.gather_perf_counters('separated')
-
+            report['perf_counters'] = self.gather_perf_counters('separated')
             report['stats_per_pool'] = self.get('pg_dump')['pool_stats']
             report['stats_per_pg'] = self.get('pg_dump')['pg_stats']
-
             report['io_rate'] = self.get_io_rate()
-
-            report['osd_perf_histograms_aggregated'] = self.get_osd_histograms('aggregated')
-            report['osd_perf_histograms_separated'] = self.get_osd_histograms('separated')
-
-            report['mempool_aggregated'] = self.get_mempool('aggregated')
-            report['mempool_separated'] = self.get_mempool('separated')
+            report['osd_perf_histograms'] = self.get_osd_histograms('separated')
+            report['mempool'] = self.get_mempool('separated')
 
         # NOTE: We do not include the 'device' channel in this report; it is
         # sent to a different endpoint.
@@ -1042,7 +1039,7 @@ Please consider enabling the telemetry module with 'ceph telemetry on'.'''
         # they are displayed horizontally instead of vertically.
         try:
             # Formatting ranges and values in osd_perf_histograms
-            modes_to_be_formatted = ['osd_perf_histograms_aggregated', 'osd_perf_histograms_separated']
+            modes_to_be_formatted = ['osd_perf_histograms']
             for mode in modes_to_be_formatted:
                 for config in report[mode]:
                     for histogram in config:
@@ -1118,11 +1115,10 @@ Device report is generated separately. To see it run 'ceph telemetry show-device
 
     def serve(self) -> None:
         self.load()
-        self.config_notify()
         self.run = True
 
         self.log.debug('Waiting for mgr to warm up')
-        self.event.wait(10)
+        time.sleep(10)
 
         while self.run:
             self.event.clear()

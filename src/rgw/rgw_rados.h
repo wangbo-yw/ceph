@@ -395,6 +395,8 @@ class RGWRados
   // This field represents the number of bucket index object shards
   uint32_t bucket_index_max_shards;
 
+  std::string get_cluster_fsid(const DoutPrefixProvider *dpp, optional_yield y);
+
   int get_obj_head_ref(const DoutPrefixProvider *dpp, const rgw_placement_rule& target_placement_rule, const rgw_obj& obj, rgw_rados_ref *ref);
   int get_obj_head_ref(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_rados_ref *ref);
   int get_system_obj_ref(const DoutPrefixProvider *dpp, const rgw_raw_obj& obj, rgw_rados_ref *ref);
@@ -480,6 +482,10 @@ public:
 
   RGWLC *get_lc() {
     return lc;
+  }
+
+  RGWGC *get_gc() {
+    return gc;
   }
 
   RGWRados& set_run_gc_thread(bool _use_gc_thread) {
@@ -1450,7 +1456,7 @@ public:
   bool process_expire_objects(const DoutPrefixProvider *dpp);
   int defer_gc(const DoutPrefixProvider *dpp, void *ctx, const RGWBucketInfo& bucket_info, const rgw_obj& obj, optional_yield y);
 
-  int process_lc();
+  int process_lc(const std::unique_ptr<rgw::sal::Bucket>& optional_bucket);
   int list_lc_progress(std::string& marker, uint32_t max_entries,
 		       std::vector<rgw::sal::Lifecycle::LCEntry>& progress_map, int& index);
 

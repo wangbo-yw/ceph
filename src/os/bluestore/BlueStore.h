@@ -75,6 +75,7 @@ enum {
   l_bluestore_allocated,
   l_bluestore_stored,
   l_bluestore_fragmentation,
+  l_bluestore_alloc_unit,
   //****************************************
 
   // Update op processing state latencies
@@ -2104,6 +2105,10 @@ private:
   int fsid_fd = -1;  ///< open handle (locked) to $path/fsid
   bool mounted = false;
 
+  // store open_db options:
+  bool db_was_opened_read_only = true;
+  bool need_to_destage_allocation_file = false;
+
   ceph::shared_mutex coll_lock = ceph::make_shared_mutex("BlueStore::coll_lock");  ///< rwlock to protect coll_map
   mempool::bluestore_cache_other::unordered_map<coll_t, CollectionRef> coll_map;
   bool collections_had_errors = false;
@@ -2176,6 +2181,7 @@ private:
   uint64_t block_size = 0;     ///< block size of block device (power of 2)
   uint64_t block_mask = 0;     ///< mask to get just the block offset
   size_t block_size_order = 0; ///< bits to shift to get block size
+  uint64_t optimal_io_size = 0;///< best performance io size for block device
 
   uint64_t min_alloc_size; ///< minimum allocation unit (power of 2)
   ///< bits for min_alloc_size
@@ -2421,7 +2427,7 @@ private:
   int _minimal_open_bluefs(bool create);
   void _minimal_close_bluefs();
   int _open_bluefs(bool create, bool read_only);
-  void _close_bluefs(bool cold_close);
+  void _close_bluefs();
 
   int _is_bluefs(bool create, bool* ret);
   /*
@@ -2429,7 +2435,7 @@ private:
   * in the proper order
   */
   int _open_db_and_around(bool read_only, bool to_repair = false);
-  void _close_db_and_around(bool read_only);
+  void _close_db_and_around();
 
   int _prepare_db_environment(bool create, bool read_only,
 			      std::string* kv_dir, std::string* kv_backend);
@@ -2441,7 +2447,7 @@ private:
   int _open_db(bool create,
 	       bool to_repair_db=false,
 	       bool read_only = false);
-  void _close_db(bool read_only);
+  void _close_db();
   void _close_db_leave_bluefs();
   int _open_fm(KeyValueDB::Transaction t, bool read_only, bool fm_restore = false);
   void _close_fm();

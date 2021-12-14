@@ -42,7 +42,10 @@ TransactionManager::mkfs_ertr::future<> TransactionManager::mkfs()
     DEBUG("about to do_with");
     segment_cleaner->init_mkfs(addr);
     return with_transaction_intr(
-        Transaction::src_t::MUTATE, [this, FNAME](auto& t) {
+      Transaction::src_t::MUTATE,
+      "mkfs_tm",
+      [this, FNAME](auto& t)
+    {
       DEBUGT("about to cache->mkfs", t);
       cache->init();
       return cache->mkfs(t
@@ -89,7 +92,8 @@ TransactionManager::mount_ertr::future<> TransactionManager::mount()
   }).safe_then([this, FNAME](auto addr) {
     segment_cleaner->set_journal_head(addr);
     return seastar::do_with(
-      create_weak_transaction(Transaction::src_t::READ),
+      create_weak_transaction(
+        Transaction::src_t::READ, "mount"),
       [this, FNAME](auto &tref) {
 	return with_trans_intr(
 	  *tref,
@@ -437,19 +441,15 @@ TransactionManager::get_extent_if_live_ret TransactionManager::get_extent_if_liv
 	      type,
 	      addr,
 	      laddr,
-	      len).si_then(
-		[this, pin=std::move(pin)](CachedExtentRef ret) mutable {
-		  auto lref = ret->cast<LogicalCachedExtent>();
-		  if (!lref->has_pin()) {
-		    assert(!(pin->has_been_invalidated() ||
-			     lref->has_been_invalidated()));
-		    lref->set_pin(std::move(pin));
-		    lba_manager->add_pin(lref->get_pin());
-		  }
-		  return inner_ret(
-		    interruptible::ready_future_marker{},
-		    ret);
-		});
+	      len,
+	      [this, pin=std::move(pin)](CachedExtent &extent) mutable {
+		auto lref = extent.cast<LogicalCachedExtent>();
+		assert(!lref->has_pin());
+		assert(!lref->has_been_invalidated());
+		assert(!pin->has_been_invalidated());
+		lref->set_pin(std::move(pin));
+		lba_manager->add_pin(lref->get_pin());
+	      });
 	  } else {
 	    return inner_ret(
 	      interruptible::ready_future_marker{},

@@ -190,6 +190,10 @@ public:
   struct io_stat_t {
     uint64_t num = 0;
     uint64_t bytes = 0;
+
+    bool is_clear() const {
+      return (num == 0 && bytes == 0);
+    }
   };
   const io_stat_t& get_fresh_block_stats() const {
     return fresh_block_stats;
@@ -204,7 +208,8 @@ public:
   enum class src_t : uint8_t {
     MUTATE = 0,
     READ, // including weak and non-weak read transactions
-    CLEANER,
+    CLEANER_TRIM,
+    CLEANER_RECLAIM,
     MAX
   };
   static constexpr auto SRC_MAX = static_cast<std::size_t>(src_t::MAX);
@@ -315,7 +320,16 @@ public:
     io_stat_t extents;
     uint64_t header_raw_bytes = 0;
     uint64_t header_bytes = 0;
+    uint64_t data_bytes = 0;
     uint64_t num_records = 0;
+
+    bool is_clear() const {
+      return (extents.is_clear() &&
+              header_raw_bytes == 0 &&
+              header_bytes == 0 &&
+              data_bytes == 0 &&
+              num_records == 0);
+    }
   };
   ool_write_stats_t& get_ool_write_stats() {
     return ool_write_stats;
@@ -410,8 +424,10 @@ inline std::ostream& operator<<(std::ostream& os,
     return os << "MUTATE";
   case Transaction::src_t::READ:
     return os << "READ";
-  case Transaction::src_t::CLEANER:
-    return os << "CLEANER";
+  case Transaction::src_t::CLEANER_TRIM:
+    return os << "CLEANER_TRIM";
+  case Transaction::src_t::CLEANER_RECLAIM:
+    return os << "CLEANER_RECLAIM";
   default:
     ceph_abort("impossible");
   }
